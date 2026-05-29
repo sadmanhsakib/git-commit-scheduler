@@ -14,15 +14,16 @@ excluded_files = [".venv", ".git", "__pycache__"]
 today = datetime.now().strftime("%Y-%m-%d")
 
 if not os.path.exists("storage/schedule.csv"):
-    df = pd.DataFrame(columns=["index", "commit_message", "project_dir", "commit_dir", "backup_dir", "priority"])
+    df = pd.DataFrame(columns=["index", "commit_message", "project_dir",
+                               "commit_dir", "backup_dir", "priority"])
     df.to_csv("storage/schedule.csv", index=False)
 
 
 def main():
-    commit_and_push()
+    schedule_commit()
 
 
-def get_total_commit_count():
+def get_total_commit_count() -> int:
     total_commits = 0
     for root, dirs, files in os.walk(SEARCH_DIR):
         root_path = Path(root)
@@ -79,7 +80,7 @@ def schedule_commit():
         except (ValueError, ZeroDivisionError):
             continue
             
-    index = int(df["index"].max()) + 1    
+    index = int(df["index"].max()) + 1 if not df.empty else 1
     commit_dir = f"storage/{index}/commit"    
     backup_dir = None
     
@@ -97,29 +98,31 @@ def schedule_commit():
 
 
 def commit_and_push():
-    df = pd.read_csv("storage/schedule.csv")
-    df['backup_dir'] = df['backup_dir'].astype(str)
+    try:
+        df = pd.read_csv("storage/schedule.csv")
+        df['backup_dir'] = df['backup_dir'].astype(str)
 
-    row = df.iloc[0]
-    
-    backup_dir = f"storage/{row['index']}/backup"
-    
-    # storing the current project 
-    os.makedirs(backup_dir, exist_ok=True)
-    shutil.copytree(row["project_dir"], backup_dir, dirs_exist_ok=True, ignore=shutil.ignore_patterns(*excluded_files))
-    df.loc[0, "backup_dir"] = backup_dir
+        row = df.iloc[0]
+        
+        backup_dir = f"storage/{row['index']}/backup"
+        
+        # storing the current project 
+        os.makedirs(backup_dir, exist_ok=True)
+        shutil.copytree(row["project_dir"], backup_dir, dirs_exist_ok=True, ignore=shutil.ignore_patterns(*excluded_files))
+        df.loc[0, "backup_dir"] = backup_dir
 
-    subprocess.run(["git", "add", "." ], cwd=row["project_dir"], check=True)
-    subprocess.run(["git", "commit", "-m", row["commit_message"]], cwd=row["project_dir"], check=True)
-    subprocess.run(["git", "push"], cwd=row["project_dir"], check=True)
-    print("✅ Git Push Successful. ")
-    
-    shutil.copytree(backup_dir, row["project_dir"], dirs_exist_ok=True)
-    
-    df = df[1:]
-    df.to_csv("storage/schedule.csv", index=False)
-    shutil.rmtree(f"storage/{row['index']}", ignore_errors=True)
-
+        subprocess.run(["git", "add", "." ], cwd=row["project_dir"], check=True)
+        subprocess.run(["git", "commit", "-m", row["commit_message"]], cwd=row["project_dir"], check=True)
+        subprocess.run(["git", "push"], cwd=row["project_dir"], check=True)
+        print("✅ Git Push Successful. ")
+        
+        shutil.copytree(backup_dir, row["project_dir"], dirs_exist_ok=True)
+        
+        df = df[1:]
+        df.to_csv("storage/schedule.csv", index=False)
+        shutil.rmtree(f"storage/{row['index']}", ignore_errors=True)
+    except Exception as error:
+        print(f"Error: {error}")
 
 if __name__ == "__main__":
     start_time = time.time()
