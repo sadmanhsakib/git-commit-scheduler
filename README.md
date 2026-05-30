@@ -14,7 +14,7 @@ You run this interactively to queue up a commit. It:
 2. Takes a snapshot of your project (minus excluded files/folders) and stores it under `storage/<index>/commit/`.
 3. Appends a row to `storage/schedule.csv`, sorted by priority (highest first).
 
-**Phase 2 — Execute (`runner.py`)**
+**Phase 2 — Execute (`runner.pyw`)**
 This is the file you point your task scheduler at. It:
 1. Counts how many commits you have already made today (across all Git repos under `SEARCH_DIR`) using `git rev-list`.
 2. If your daily commit count is **≤ 2**, it pops the highest-priority item from the queue, creates a backup snapshot at `storage/<index>/backup/`, runs `git add . && git commit && git push`, then restores the backup to the project directory and cleans up storage.
@@ -25,7 +25,7 @@ The backup-then-restore pattern means your working directory is always left in a
 ```
 git-commit-scheduler/
 ├── main.py            # Interactive scheduler — queue a new commit
-├── runner.py          # Executor — called by the task scheduler
+├── runner.pyw          # Executor — called by the task scheduler
 ├── storage/
 │   ├── schedule.csv   # The commit queue (index, message, dirs, priority)
 │   └── <index>/
@@ -77,7 +77,7 @@ Open `.env` and set:
 # The email address associated with your Git commits (used to count today's commits)
 EMAIL=you@example.com
 
-# Root directory that runner.py will walk to count today's commits
+# Root directory that runner.pyw will walk to count today's commits
 SEARCH_DIR=D:\projects
 ```
 
@@ -103,7 +103,7 @@ You will be prompted for:
 ## Running the Executor Manually
 
 ```bash
-uv run python runner.py
+uv run python runner.pyw
 ```
 
 This will process the queue until your daily commit count exceeds 2, then stop.
@@ -112,7 +112,7 @@ This will process the queue until your daily commit count exceeds 2, then stop.
 
 ## Automating with Windows Task Scheduler
 
-This is the intended way to run `runner.py` — set it and forget it.
+This is the intended way to run `runner.pyw` — set it and forget it.
 
 ### Step-by-step
 
@@ -139,7 +139,7 @@ This is the intended way to run `runner.py` — set it and forget it.
   ```
 - Add arguments:
   ```
-  run python runner.py
+  run python runner.pyw
   ```
 - Start in (the project root):
   ```
@@ -160,19 +160,16 @@ This is the intended way to run `runner.py` — set it and forget it.
 
 ## Adjusting the Daily Commit Threshold
 
-The threshold is hardcoded in `runner.py`:
+The threshold is controlled by the `LIMIT` variable in your `.env` file:
 
-```python
-while not get_total_commit_count() > 2:
-    commit_and_push()
+```env
+LIMIT=2
 ```
 
-Change `2` to whatever daily commit target you want. For example, to stop after 5 commits today:
+`runner.pyw` will keep popping from the queue until your total commit count for today exceeds this value, then stop. Change it to any integer without touching code.
 
-```python
-while not get_total_commit_count() > 5:
-    commit_and_push()
-```
+`LIMIT` is optional. If it is not set, `runner.pyw` will execute exactly one commit from the queue and stop, regardless of how many commits you have made today.
+If you don't want any limit, just leave it empty(`LIMIT=`). `runner.pyw` will keep commiting until the queue is empty then. 
 
 ---
 
@@ -186,8 +183,9 @@ while not get_total_commit_count() > 5:
 | `commit_dir` | Path to the snapshot taken at schedule time |
 | `backup_dir` | Path to the snapshot taken just before push |
 | `priority` | Sort key — higher values are processed first |
+| `excluded_files` | List of file/folder names excluded from both the commit and backup snapshots |
 
-The CSV is sorted by `priority` descending every time a new entry is added. `runner.py` always pops `iloc[0]` — the highest-priority pending commit.
+The CSV is sorted by `priority` descending every time a new entry is added. `runner.pyw` always pops `iloc[0]` — the highest-priority pending commit.
 
 ---
 
@@ -197,6 +195,7 @@ The CSV is sorted by `priority` descending every time a new entry is added. `run
 |---|---|---|
 | `EMAIL` | Yes | Git author email used to filter `git rev-list --author` |
 | `SEARCH_DIR` | Yes | Root directory walked to count today's commits |
+| `LIMIT` | No | Daily commit threshold — runner stops once today's commit count exceeds this value. If unset, exactly one commit is executed per run |
 
 ---
 

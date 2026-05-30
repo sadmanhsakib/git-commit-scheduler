@@ -10,12 +10,11 @@ load_dotenv()
 AUTHOR_EMAIL = os.getenv("EMAIL")
 SEARCH_DIR = os.getenv("SEARCH_DIR")
 
-excluded_files = [".venv", ".git", "__pycache__"]
 today = datetime.now().strftime("%Y-%m-%d")
 
 if not os.path.exists("storage/schedule.csv"):
     df = pd.DataFrame(columns=["index", "commit_message", "project_dir",
-                               "commit_dir", "backup_dir", "priority"])
+                               "commit_dir", "backup_dir", "priority", "excluded_files"])
     df.to_csv("storage/schedule.csv", index=False)
 
 
@@ -60,18 +59,19 @@ def schedule_commit():
 
     while True:
         try:
+            excluded_files = [".venv", ".git", "__pycache__"]
             excluded_files.extend(input("Excluded Files (space-separated): ").split())
             break
         except (ValueError, ZeroDivisionError):
             continue
-    
+
     while True:
         project_dir = input("Project Directory: ")
         if os.path.exists(Path(project_dir) / ".git"):
             break
 
     df = pd.read_csv("storage/schedule.csv")
-    
+
     while True:
         try:
             priority = int(input("Priority: "))
@@ -79,45 +79,54 @@ def schedule_commit():
                 break
         except (ValueError, ZeroDivisionError):
             continue
-            
+
     index = int(df["index"].max()) + 1 if not df.empty else 1
     commit_dir = f"storage/{index}/commit"    
     backup_dir = None
-    
+
     os.makedirs(commit_dir, exist_ok=True)
 
-    # storing the current project 
+    # storing the current project
     shutil.copytree(project_dir, commit_dir, 
                     dirs_exist_ok=True, ignore=shutil.ignore_patterns(*excluded_files))
-        
-    df.loc[len(df)] = [index, commit_message, project_dir, commit_dir, backup_dir, priority]
+
+    
+    excluded_files_str = " ".join(excluded_files)
+    df.loc[len(df)] = [index, commit_message, project_dir, commit_dir,
+                       backup_dir, priority, excluded_files_str]
     df = df.sort_values(by="priority", ascending=False)
     df.to_csv("storage/schedule.csv", index=False)
-    
+
     print("✅ Commit scheduled successfully!")
 
 
 def commit_and_push():
     try:
         df = pd.read_csv("storage/schedule.csv")
+
+        if df.empty:
+            print("Nothing to commit. ")
+            return "Nothing to commit. "
+
         df['backup_dir'] = df['backup_dir'].astype(str)
 
         row = df.iloc[0]
-        
         backup_dir = f"storage/{row['index']}/backup"
-        
-        # storing the current project 
+        excluded_files = row['excluded_files'].split()
+
+        # storing the current project
         os.makedirs(backup_dir, exist_ok=True)
-        shutil.copytree(row["project_dir"], backup_dir, dirs_exist_ok=True, ignore=shutil.ignore_patterns(*excluded_files))
+        shutil.copytree(row["project_dir"], backup_dir,dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns(*excluded_files))
         df.loc[0, "backup_dir"] = backup_dir
 
         subprocess.run(["git", "add", "." ], cwd=row["project_dir"], check=True)
         subprocess.run(["git", "commit", "-m", row["commit_message"]], cwd=row["project_dir"], check=True)
         subprocess.run(["git", "push"], cwd=row["project_dir"], check=True)
         print("✅ Git Push Successful. ")
-        
+
         shutil.copytree(backup_dir, row["project_dir"], dirs_exist_ok=True)
-        
+
         df = df[1:]
         df.to_csv("storage/schedule.csv", index=False)
         shutil.rmtree(f"storage/{row['index']}", ignore_errors=True)
