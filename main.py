@@ -114,11 +114,13 @@ def commit_and_push():
         backup_dir = f"storage/{row['index']}/backup"
         excluded_files = row['excluded_files'].split()
 
-        # storing the current project
+        # storing the current project snapshot
         os.makedirs(backup_dir, exist_ok=True)
-        shutil.copytree(row["project_dir"], backup_dir,dirs_exist_ok=True,
+        shutil.copytree(row["project_dir"], backup_dir, dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns(*excluded_files))
         df.loc[0, "backup_dir"] = backup_dir
+        
+        shutil.copytree(row["commit_dir"], row["project_dir"], dirs_exist_ok=True)
 
         subprocess.run(["git", "add", "." ], cwd=row["project_dir"], check=True)
         subprocess.run(["git", "commit", "-m", row["commit_message"]], cwd=row["project_dir"], check=True)
