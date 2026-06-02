@@ -15,6 +15,7 @@ today = datetime.now().strftime("%Y-%m-%d")
 if not os.path.exists("storage/schedule.csv"):
     df = pd.DataFrame(columns=["index", "commit_message", "project_dir",
                                "commit_dir", "backup_dir", "priority", "excluded_files"])
+    os.makedirs("storage", exist_ok=True)
     df.to_csv("storage/schedule.csv", index=False)
 
 
@@ -24,7 +25,7 @@ def main():
 
 def get_total_commit_count() -> int:
     total_commits = 0
-    for root, dirs, files in os.walk(SEARCH_DIR):
+    for root, dirs, _ in os.walk(SEARCH_DIR):
         root_path = Path(root)
 
         if (root_path / ".git").exists():
@@ -105,9 +106,8 @@ def commit_and_push():
         df = pd.read_csv("storage/schedule.csv")
 
         if df.empty:
-            print("Nothing to commit. ")
-            return "Nothing to commit. "
-
+            return None
+        
         df['backup_dir'] = df['backup_dir'].astype(str)
 
         row = df.iloc[0]

@@ -8,16 +8,16 @@ load_dotenv()
 
 if __name__ == "__main__":
     limit = os.getenv("LIMIT")
-    if limit:
-        limit = int(limit)
-    else:
-        limit = None
+
+    limit = int(limit) - 1 if limit else None
 
     if limit:
         while not get_total_commit_count() > limit:
-            commit_and_push()
+            result = commit_and_push()
+            if not result:
+                break
     else:
         while True:
             result = commit_and_push()
-            if result == "Nothing to commit. ":
+            if not result:
                 break
