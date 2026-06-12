@@ -1,3 +1,6 @@
+> **⚠️ ARCHIVED PROJECT**  
+> This project is archived and now part of my [automation-toolbox](https://github.com/sadmanhsakib/automation-toolbox) repository.
+
 # git-commit-scheduler
 
 Queues Git commits with priority ordering and executes them based on a configurable daily threshold. Snapshots are taken before and after operations to enable rollback on failure.
