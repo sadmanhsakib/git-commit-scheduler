@@ -1,5 +1,7 @@
-import os, time
-import shutil, subprocess
+import os
+import time
+import shutil
+import subprocess
 import pandas as pd
 from datetime import datetime
 from dotenv import load_dotenv
@@ -10,13 +12,19 @@ load_dotenv()
 AUTHOR_EMAIL = os.getenv("EMAIL")
 SEARCH_DIR = os.getenv("SEARCH_DIR")
 
-today = datetime.now().strftime("%Y-%m-%d")
+if not AUTHOR_EMAIL or not SEARCH_DIR:
+    print("Please set EMAIL and SEARCH_DIR in .env")
+    exit(1)
 
-if not os.path.exists("storage/schedule.csv"):
+today = datetime.now().strftime("%Y-%m-%d")
+STORAGE_PATH = Path(__file__).parent / "storage" / "schedule.csv"
+LOCK_FILE = Path(__file__).parent / "storage" / "schedule.lock"
+
+if not os.path.exists(STORAGE_PATH):
     df = pd.DataFrame(columns=["index", "commit_message", "project_dir",
                                "commit_dir", "backup_dir", "priority", "excluded_files"])
-    os.makedirs("storage", exist_ok=True)
-    df.to_csv("storage/schedule.csv", index=False)
+    os.makedirs(STORAGE_PATH.parent, exist_ok=True)
+    df.to_csv(STORAGE_PATH, index=False)
 
 
 def main():
@@ -55,6 +63,45 @@ def get_total_commit_count() -> int:
     return total_commits
 
 
+def acquire_lock():
+    """Acquire file lock for CSV operations using a simple lock file mechanism."""
+    max_retries = 100
+    retry_delay = 0.1
+    
+    for attempt in range(max_retries):
+        try:
+            # Try to create the lock file exclusively
+            if not LOCK_FILE.exists():
+                LOCK_FILE.touch()
+                # Write our PID to the lock file for debugging
+                with open(LOCK_FILE, 'w') as f:
+                    f.write(str(os.getpid()))
+                return LOCK_FILE
+            else:
+                # Check if the lock is stale (older than 5 minutes)
+                lock_age = time.time() - LOCK_FILE.stat().st_mtime
+                if lock_age > 300:  # 5 minutes
+                    print("⚠️ Removing stale lock file")
+                    LOCK_FILE.unlink()
+                    continue
+                # Wait and retry
+                time.sleep(retry_delay)
+        except Exception as e:
+            print(f"⚠️ Error acquiring lock: {e}")
+            time.sleep(retry_delay)
+    
+    raise TimeoutError(f"Could not acquire lock after {max_retries} retries")
+
+
+def release_lock(lock_file):
+    """Release file lock by removing the lock file."""
+    try:
+        if lock_file and lock_file.exists():
+            lock_file.unlink()
+    except Exception as e:
+        print(f"⚠️ Error releasing lock: {e}")
+
+
 def schedule_commit():
     commit_message = input("Commit Message: ")
 
@@ -63,7 +110,8 @@ def schedule_commit():
             excluded_files = [".venv", ".git", "__pycache__"]
             excluded_files.extend(input("Excluded Files (space-separated): ").split())
             break
-        except (ValueError, ZeroDivisionError):
+        except ValueError:
+            print("⚠️ Please enter valid file names separated by spaces.")
             continue
 
     while True:
@@ -71,44 +119,51 @@ def schedule_commit():
         if os.path.exists(Path(project_dir) / ".git"):
             break
 
-    df = pd.read_csv("storage/schedule.csv")
+    lock = acquire_lock()
+    try:
+        df = pd.read_csv(STORAGE_PATH)
 
-    while True:
-        try:
-            priority = int(input("Priority: "))
-            if priority >= 0 and priority not in df["priority"].values:
-                break
-        except (ValueError, ZeroDivisionError):
-            continue
+        while True:
+            try:
+                priority = int(input("Priority: "))
+                if priority >= 0 and (df.empty or priority not in df["priority"].values):
+                    break
+                else:
+                    print("⚠️ Priority already exists. Please choose a different priority.")
+            except ValueError:
+                print("⚠️ Please enter a valid integer for priority.")
+                continue
 
-    index = int(df["index"].max()) + 1 if not df.empty else 1
-    commit_dir = f"storage/{index}/commit"    
-    backup_dir = None
+        index = int(df["index"].max()) + 1 if not df.empty else 1
+        commit_dir = f"storage/{index}/commit"    
+        backup_dir = None
 
-    os.makedirs(commit_dir, exist_ok=True)
+        os.makedirs(commit_dir, exist_ok=True)
 
-    # storing the current project
-    shutil.copytree(project_dir, commit_dir, 
-                    dirs_exist_ok=True, ignore=shutil.ignore_patterns(*excluded_files))
+        # storing the current project
+        shutil.copytree(project_dir, commit_dir, 
+                        dirs_exist_ok=True, ignore=shutil.ignore_patterns(*excluded_files))
 
-    
-    excluded_files_str = " ".join(excluded_files)
-    df.loc[len(df)] = [index, commit_message, project_dir, commit_dir,
-                       backup_dir, priority, excluded_files_str]
-    df = df.sort_values(by="priority", ascending=False)
-    df.to_csv("storage/schedule.csv", index=False)
+        excluded_files_str = " ".join(excluded_files)
+        df.loc[len(df)] = [index, commit_message, project_dir, commit_dir,
+                           backup_dir, priority, excluded_files_str]
+        df = df.sort_values(by="priority", ascending=False)
+        df.to_csv(STORAGE_PATH, index=False)
 
-    print("✅ Commit scheduled successfully!")
+        print("✅ Commit scheduled successfully!")
+    finally:
+        release_lock(lock)
 
 
 def commit_and_push():
+    backup_dir = None
     try:
-        df = pd.read_csv("storage/schedule.csv")
+        lock = acquire_lock()
+        df = pd.read_csv(STORAGE_PATH)
 
         if df.empty:
+            release_lock(lock)
             return None
-        
-        df['backup_dir'] = df['backup_dir'].astype(str)
 
         row = df.iloc[0]
         backup_dir = f"storage/{row['index']}/backup"
@@ -119,23 +174,45 @@ def commit_and_push():
         shutil.copytree(row["project_dir"], backup_dir, dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns(*excluded_files))
         df.loc[0, "backup_dir"] = backup_dir
+        df.to_csv(STORAGE_PATH, index=False)
+        release_lock(lock)
         
-        shutil.copytree(row["commit_dir"], row["project_dir"], dirs_exist_ok=True)
+        # Restore from backup if git operations fail
+        try:
+            shutil.copytree(row["commit_dir"], row["project_dir"], dirs_exist_ok=True)
 
-        subprocess.run(["git", "add", "." ], cwd=row["project_dir"], check=True)
-        subprocess.run(["git", "commit", "-m", row["commit_message"]], cwd=row["project_dir"], check=True)
-        subprocess.run(["git", "push"], cwd=row["project_dir"], check=True)
-        print("✅ Git Push Successful. ")
+            subprocess.run(["git", "add", "." ], cwd=row["project_dir"], check=True)
+            subprocess.run(["git", "commit", "-m", row["commit_message"]], cwd=row["project_dir"], check=True)
+            subprocess.run(["git", "push"], cwd=row["project_dir"], check=True)
+            print("✅ Git Push Successful. ")
+        except Exception as git_error:
+            print(f"Git operation failed: {git_error}")
+            print("Restoring project from backup...")
+            if backup_dir and os.path.exists(backup_dir):
+                shutil.copytree(backup_dir, row["project_dir"], dirs_exist_ok=True)
+            raise git_error
 
+        # Restore from backup after successful push
         shutil.copytree(backup_dir, row["project_dir"], dirs_exist_ok=True)
 
-        df = df[1:]
-        df.to_csv("storage/schedule.csv", index=False)
-        shutil.rmtree(f"storage/{row['index']}", ignore_errors=True)
+        lock = acquire_lock()
+        df = pd.read_csv(STORAGE_PATH)
+        df = df.iloc[1:].reset_index(drop=True)
+        df.to_csv(STORAGE_PATH, index=False)
+        shutil.rmtree(f"storage/{row['index']}")
+        release_lock(lock)
+        
+        return True
     except Exception as error:
         print(f"Error: {error}")
+        # Ensure lock is released if error occurs
+        try:
+            if 'lock' in locals():
+                release_lock(lock)
+        except:
+            pass
+        return False
+
 
 if __name__ == "__main__":
-    start_time = time.time()
     main()
-    print(f"✅ Execution completed in {time.time() - start_time:.2f} seconds")

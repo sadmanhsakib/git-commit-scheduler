@@ -1,11 +1,10 @@
 [project]
 name = "git-commit-scheduler"
 version = "0.1.0"
-description = "Add your description here"
+description = "Automatically stage, commit, and push your Git projects on a schedule — with priority queuing, snapshot backups, and a configurable commit threshold."
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 dependencies = [
     "dotenv>=0.9.9",
-    "ipykernel>=7.2.0",
     "pandas>=3.0.3",
 ]
