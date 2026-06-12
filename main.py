@@ -121,7 +121,15 @@ def schedule_commit():
 
     lock = acquire_lock()
     try:
-        df = pd.read_csv(STORAGE_PATH)
+        df = pd.read_csv(STORAGE_PATH, dtype={
+            "index": "int64",
+            "commit_message": "str",
+            "project_dir": "str",
+            "commit_dir": "str",
+            "backup_dir": "str",
+            "priority": "int64",
+            "excluded_files": "str"
+        })
 
         while True:
             try:
@@ -136,7 +144,7 @@ def schedule_commit():
 
         index = int(df["index"].max()) + 1 if not df.empty else 1
         commit_dir = f"storage/{index}/commit"    
-        backup_dir = None
+        backup_dir = ""  # Empty string instead of None to ensure string dtype
 
         os.makedirs(commit_dir, exist_ok=True)
 
@@ -159,7 +167,15 @@ def commit_and_push():
     backup_dir = None
     try:
         lock = acquire_lock()
-        df = pd.read_csv(STORAGE_PATH)
+        df = pd.read_csv(STORAGE_PATH, dtype={
+            "index": "int64",
+            "commit_message": "str",
+            "project_dir": "str",
+            "commit_dir": "str",
+            "backup_dir": "str",
+            "priority": "int64",
+            "excluded_files": "str"
+        })
 
         if df.empty:
             release_lock(lock)
@@ -196,7 +212,15 @@ def commit_and_push():
         shutil.copytree(backup_dir, row["project_dir"], dirs_exist_ok=True)
 
         lock = acquire_lock()
-        df = pd.read_csv(STORAGE_PATH)
+        df = pd.read_csv(STORAGE_PATH, dtype={
+            "index": "int64",
+            "commit_message": "str",
+            "project_dir": "str",
+            "commit_dir": "str",
+            "backup_dir": "str",
+            "priority": "int64",
+            "excluded_files": "str"
+        })
         df = df.iloc[1:].reset_index(drop=True)
         df.to_csv(STORAGE_PATH, index=False)
         shutil.rmtree(f"storage/{row['index']}")

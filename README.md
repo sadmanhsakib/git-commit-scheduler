@@ -1,58 +1,73 @@
 # git-commit-scheduler
 
-> Automatically stage, commit, and push your Git projects on a schedule — with priority queuing, snapshot backups, and a configurable commit threshold.
+Queues Git commits with priority ordering and executes them based on a configurable daily threshold. Snapshots are taken before and after operations to enable rollback on failure.
 
 ---
 
-## How It Works
+## Architecture
 
-The scheduler operates in two distinct phases:
+The tool operates in two phases:
 
-**Phase 1 — Schedule (`main.py`)**
-You run this interactively to queue up a commit. It:
-1. Prompts you for a commit message, files to exclude, the project directory, and a priority level.
-2. Takes a snapshot of your project (minus excluded files/folders) and stores it under `storage/<index>/commit/`.
-3. Appends a row to `storage/schedule.csv`, sorted by priority (highest first).
+**Scheduling Phase (`main.py`)**
 
-**Phase 2 — Execute (`runner.pyw`)**
-This is the file you point your task scheduler at. It:
-1. Counts how many commits you have already made today (across all Git repos under `SEARCH_DIR`) using `git rev-list`.
-2. If your daily commit count is **≤ 2**, it pops the highest-priority item from the queue, creates a backup snapshot at `storage/<index>/backup/`, runs `git add . && git commit && git push`, then restores the backup to the project directory and cleans up storage.
-3. Repeats until the daily threshold is met or the queue is empty.
+The script prompts for commit details (message, target directory, priority, excluded files), snapshots the current project state to `storage/<index>/commit/`, and appends an entry to `storage/schedule.csv` sorted by priority descending.
 
-The backup-then-restore pattern means your working directory is always left in a clean, known state after a push — even if something goes wrong mid-flight.
+**Execution Phase (`runner.pyw`)**
+
+The script counts commits made today across all repositories under `SEARCH_DIR` (filtered by author email), then processes the queue until the daily limit is reached or the queue is empty. For each commit:
+
+1. Acquires a file lock (`storage/schedule.lock`) before CSV operations
+2. Reads the queue and selects the highest-priority entry (`iloc[0]`)
+3. Creates a backup snapshot at `storage/<index>/backup/`
+4. Updates the CSV with the backup path and releases the lock
+5. Overwrites the target directory with the scheduled snapshot
+6. Executes `git add .`, `git commit -m`, and `git push`
+7. Restores the target directory from backup (regardless of Git operation outcome)
+8. Acquires lock, removes the processed entry from CSV, deletes `storage/<index>/`, and releases lock
+
+If Git operations fail, the backup is restored before re-raising the exception. CSV modifications are protected by a file-based lock mechanism with 100 retries at 0.1-second intervals. Locks older than 5 minutes are automatically removed as stale.
 
 ```
-git-commit-scheduler/
-├── main.py            # Interactive scheduler — queue a new commit
-├── runner.pyw          # Executor — called by the task scheduler
-├── storage/
-│   ├── schedule.csv   # The commit queue (index, message, dirs, priority)
-│   └── <index>/
-│       ├── commit/    # Snapshot taken at schedule time
-│       └── backup/    # Snapshot taken just before push (restored after)
-├── .env               # Your local config (not committed)
-├── example.env        # Template for .env
-└── pyproject.toml
+Execution Flow
+──────────────
+acquire_lock()
+    ├─ Create schedule.lock if absent
+    ├─ Write PID to lock file
+    └─ Retry up to 100 times (0.1s delay)
+        └─ Remove stale locks (>5 min)
+
+commit_and_push()
+    ├─ Lock → Read CSV → Create backup → Update CSV → Release
+    ├─ Copy commit snapshot to project_dir
+    ├─ git add . && git commit && git push
+    │   └─ On failure: Restore from backup, re-raise
+    ├─ Restore from backup (always)
+    └─ Lock → Remove entry → Delete storage/<index>/ → Release
 ```
 
 ---
 
-## Prerequisites
+## Requirements
 
-- Python ≥ 3.14
-- [uv](https://docs.astral.sh/uv/) (recommended) or pip
-- Git installed and available on `PATH`
-- Git remotes already configured on the projects you want to push
+| Requirement | Version | Purpose |
+|------------|---------|---------|
+| Python | ≥ 3.12 | Runtime (specified in `pyproject.toml`) |
+| Git | Any | Commit and push operations via subprocess |
+| pandas | ≥ 3.0.3 | CSV queue management |
+| python-dotenv | ≥ 0.9.9 | Environment variable loading |
+
+**System Dependencies:**
+- Git must be on `PATH`
+- Git remotes must be pre-configured with authentication (SSH keys or credential manager)
 
 ---
 
-## Setup
+## Installation
 
-### 1. Clone and install dependencies
+Clone the repository and install dependencies:
 
 ```bash
-git clone <your-fork-url> git-commit-scheduler
+git clone <repository-url> git-commit-scheduler
 cd git-commit-scheduler
 uv sync
 ```
@@ -63,145 +78,177 @@ Or with pip:
 pip install -e .
 ```
 
-### 2. Configure environment variables
+---
 
-Copy the template and fill in your values:
+## Configuration
 
-```bash
-copy example.env .env
-```
-
-Open `.env` and set:
+Copy `example.env` to `.env` and populate the required variables:
 
 ```env
-# The email address associated with your Git commits (used to count today's commits)
 EMAIL=you@example.com
-
-# Root directory that runner.pyw will walk to count today's commits
 SEARCH_DIR=D:\projects
-```
-
-`SEARCH_DIR` should be the parent folder that contains all your Git repositories. The script walks it recursively and stops descending when it finds a `.git` directory, so nested repos are handled correctly.
-
-### 3. Queue your first commit
-
-```bash
-uv run python main.py
-```
-
-You will be prompted for:
-
-| Prompt | Description |
-|---|---|
-| `Commit Message` | The message passed to `git commit -m` |
-| `Excluded Files` | Space-separated file/folder names to skip when snapshotting (e.g. `.venv node_modules dist`) |
-| `Project Directory` | Absolute path to the Git repo you want to commit |
-| `Priority` | Integer ≥ 0, unique. Higher number = processed first |
-
----
-
-## Running the Executor Manually
-
-```bash
-uv run python runner.pyw
-```
-
-This will process the queue until your daily commit count exceeds 2, then stop.
-
----
-
-## Automating with Windows Task Scheduler
-
-This is the intended way to run `runner.pyw` — set it and forget it.
-
-### Step-by-step
-
-1. Open **Task Scheduler** (`taskschd.msc`).
-2. Click **Create Task** (not "Basic Task" — you need the full editor).
-
-**General tab**
-- Name: `git-commit-scheduler`
-- Check **Run whether user is logged on or not**
-- Check **Run with highest privileges**
-
-**Triggers tab**
-- Click **New…**
-- Begin the task: **On a schedule**
-- Choose **Daily**, set your preferred time (e.g. `11:00 PM`)
-- Optionally add a second trigger at a different time if you want multiple pushes per day
-
-**Actions tab**
-- Click **New…**
-- Action: **Start a program**
-- Program/script: full path to your `uv` executable, e.g.:
-  ```
-  C:\Users\<you>\.local\bin\uv.exe
-  ```
-- Add arguments:
-  ```
-  run python runner.pyw
-  ```
-- Start in (the project root):
-  ```
-  D:\scripts\git-commit-scheduler
-  ```
-
-**Conditions tab**
-- Uncheck **Start the task only if the computer is on AC power** if you are on a laptop and want it to run on battery.
-
-**Settings tab**
-- Check **If the task is already running, do not start a new instance**
-
-3. Click **OK** and enter your Windows password when prompted.
-
-> **Tip:** To verify the task works, right-click it in Task Scheduler and choose **Run**. Check the Last Run Result column — `0x0` means success.
-
----
-
-## Adjusting the Daily Commit Threshold
-
-The threshold is controlled by the `LIMIT` variable in your `.env` file:
-
-```env
 LIMIT=2
 ```
 
-`runner.pyw` will keep popping from the queue until your total commit count for today exceeds this value, then stop. Change it to any integer without touching code.
-
-`LIMIT` is optional. If it is not set, `runner.pyw` will execute exactly one commit from the queue and stop, regardless of how many commits you have made today.
-If you don't want any limit, just leave it empty(`LIMIT=`). `runner.pyw` will keep commiting until the queue is empty then. 
-
----
-
-## The Commit Queue (`storage/schedule.csv`)
-
-| Column | Description |
-|---|---|
-| `index` | Auto-incremented ID, also used as the storage folder name |
-| `commit_message` | Message passed to `git commit -m` |
-| `project_dir` | Absolute path to the target Git repo |
-| `commit_dir` | Path to the snapshot taken at schedule time |
-| `backup_dir` | Path to the snapshot taken just before push |
-| `priority` | Sort key — higher values are processed first |
-| `excluded_files` | List of file/folder names excluded from both the commit and backup snapshots |
-
-The CSV is sorted by `priority` descending every time a new entry is added. `runner.pyw` always pops `iloc[0]` — the highest-priority pending commit.
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `EMAIL` | Yes | None | Git author email. Used to filter commits when counting today's total. Script exits with error if unset. |
+| `SEARCH_DIR` | Yes | None | Root directory containing Git repositories. Walked recursively via `os.walk()`. Nested repositories (repos inside repos) are detected and excluded from descent. Script exits with error if unset. |
+| `LIMIT` | No | None | Daily commit threshold. Execution stops when `get_total_commit_count()` reaches this value. If unset or empty, processes the entire queue without limit. |
 
 ---
 
-## Environment Variables Reference
+## Usage
 
-| Variable | Required | Description |
-|---|---|---|
-| `EMAIL` | Yes | Git author email used to filter `git rev-list --author` |
-| `SEARCH_DIR` | Yes | Root directory walked to count today's commits |
-| `LIMIT` | No | Daily commit threshold — runner stops once today's commit count exceeds this value. If unset, exactly one commit is executed per run |
+### Schedule a Commit
+
+```bash
+python main.py
+```
+
+The script prompts for:
+
+- **Commit Message**: Text passed to `git commit -m`
+- **Excluded Files**: Space-separated list of file/folder names. These are added to the default exclusions (`.venv`, `.git`, `__pycache__`) and passed to `shutil.ignore_patterns()` during snapshot.
+- **Project Directory**: Absolute path to the target repository. Must contain a `.git` directory; re-prompts if absent.
+- **Priority**: Unique non-negative integer. Higher values are processed first. Re-prompts if the value already exists in the queue.
+
+The scheduler:
+1. Acquires a file lock (`storage/schedule.lock`)
+2. Generates a new `index` (max existing index + 1, or 1 if queue is empty)
+3. Copies the project directory to `storage/<index>/commit/`, excluding specified files
+4. Appends a row to `storage/schedule.csv` and re-sorts by priority (descending)
+5. Releases the lock
+
+### Execute the Queue
+
+```bash
+python runner.pyw
+```
+
+**Behavior depends on `LIMIT` configuration:**
+
+- **If `LIMIT` is set:** Loops while `get_total_commit_count() < LIMIT`, calling `commit_and_push()` until the limit is reached or the queue is empty.
+- **If `LIMIT` is unset or empty:** Loops unconditionally, processing all queued commits until the queue is empty.
+
+The executor stops early if `commit_and_push()` returns `False` (indicating an error) or `None` (indicating an empty queue).
 
 ---
 
-## Notes and Caveats
+## Automation with Windows Task Scheduler
 
-- **`git push` must be pre-authenticated.** The script does not handle credentials. Use SSH keys or a credential manager (e.g. Git Credential Manager) so pushes succeed non-interactively.
-- **The backup is a full directory copy**, not a diff. For very large repos, make sure you have enough disk space in `storage/`.
-- **`storage/` is gitignored** by default, so your snapshots and the schedule CSV are local-only.
-- The daily commit counter uses `--since=<today> 00:00` with your configured `EMAIL`, so it correctly reflects only your commits made today, not all commits in the repo.
+Open **Task Scheduler** (`taskschd.msc`) and click **Create Task**.
+
+**General**
+- Name: `git-commit-scheduler`
+- ☑ Run whether user is logged on or not
+- ☑ Run with highest privileges
+
+**Triggers**
+- New → On a schedule → Daily
+- Set execution time (e.g., 11:00 PM)
+- Add additional triggers if multiple daily runs are needed
+
+**Actions**
+- New → Start a program
+- Program/script: `pythonw.exe` (or absolute path to `pythonw.exe` for silent execution)
+- Arguments: `runner.pyw`
+- Start in: `D:\scripts\git-commit-scheduler` (absolute path to project root)
+
+**Conditions**
+- Uncheck "Start the task only if the computer is on AC power" for laptop use
+
+**Settings**
+- ☑ If the task is already running, do not start a new instance
+
+Verify the task by right-clicking it and selecting **Run**. A Last Run Result of `0x0` indicates success.
+
+---
+
+## Output Structure
+
+The tool creates the following directory structure:
+
+```
+storage/
+├── schedule.csv          # Priority-sorted queue
+├── schedule.lock         # File lock (transient, removed after operations)
+└── <index>/              # Per-commit working directories (deleted after push)
+    ├── commit/           # Snapshot of project state at scheduling time
+    └── backup/           # Snapshot of project state before Git operations
+```
+
+**CSV Schema (`storage/schedule.csv`):**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `index` | int | Auto-incremented identifier (max + 1). Used as the snapshot directory name. |
+| `commit_message` | str | Message passed to `git commit -m`. |
+| `project_dir` | str | Absolute path to the target repository. |
+| `commit_dir` | str | Path to the scheduled snapshot (always `storage/<index>/commit`). |
+| `backup_dir` | str | Path to the pre-push snapshot (initially `None`, set to `storage/<index>/backup` during execution). |
+| `priority` | int | Sort key (descending). Higher values are processed first. Must be unique and non-negative. |
+| `excluded_files` | str | Space-separated list of file/folder names excluded from snapshots via `shutil.ignore_patterns()`. |
+
+The file is initialized with these columns if it does not exist. Rows are sorted by `priority` descending after each addition. The executor always processes `iloc[0]` (highest priority).
+
+---
+
+## Error Handling
+
+**Lock Acquisition Failures:**
+- The `acquire_lock()` function retries 100 times at 0.1-second intervals before raising `TimeoutError`.
+- Locks older than 5 minutes are considered stale and automatically removed.
+- The lock file contains the process PID for debugging.
+
+**Git Operation Failures:**
+- If `git add`, `git commit`, or `git push` fails, the exception is caught in `commit_and_push()`.
+- The project directory is restored from `backup/` before re-raising the exception.
+- The CSV entry and storage directory are **not** removed on failure, allowing manual investigation or retry.
+- The function returns `False` on error, causing `runner.pyw` to stop processing.
+
+**Empty Queue:**
+- `commit_and_push()` returns `None` if the CSV is empty, causing `runner.pyw` to exit.
+
+**Missing Environment Variables:**
+- The script checks for `EMAIL` and `SEARCH_DIR` on startup. If either is unset, it prints an error message and exits with code 1.
+
+**Lock Release Failures:**
+- The `release_lock()` function suppresses exceptions when removing the lock file, printing a warning instead.
+- Errors during lock release in `commit_and_push()` are wrapped in a try-except to ensure they do not mask Git operation failures.
+
+---
+
+## Limitations
+
+- **Lock mechanism is simple polling.** The tool retries 100 times at 0.1-second intervals (maximum 10-second wait). High contention may cause delays or lock acquisition failure.
+- **Snapshots are full directory copies.** `shutil.copytree()` duplicates the entire project directory minus excluded files. Large repositories consume significant disk space in `storage/`.
+- **Priority must be manually managed.** The tool enforces unique priorities but does not provide renumbering or automatic gap filling. Scheduling with an existing priority causes a re-prompt.
+- **Nested repositories are counted correctly.** `os.walk()` detects `.git` directories and prunes further descent (`dirs[:] = []`), preventing double-counting in nested repositories.
+- **Daily commit count is author-filtered and date-bound.** The count uses `git rev-list --count HEAD --since=<today> 00:00 --author=<EMAIL>`, which depends on Git's date parsing and the system clock. Commits made in a different timezone may not be counted correctly.
+- **`git push` errors do not delete the queue entry.** Failed commits remain in the queue and must be manually removed from `storage/schedule.csv` or retried.
+- **`storage/` is local only.** The `.gitignore` file excludes `storage/` from version control. Snapshots and the queue are not shared across machines.
+- **Excluded files are stored as space-separated strings.** File names containing spaces will cause incorrect parsing during execution.
+- **The tool uses `subprocess.run(..., check=True)` for Git commands.** Non-zero exit codes raise `CalledProcessError`, which is caught and handled as described in Error Handling.
+
+---
+
+## Corrections
+
+- **Architecture:** Added explicit lock acquisition/release steps in execution flow. The original README mentioned the lock mechanism but did not detail when locks are acquired and released during `commit_and_push()`.
+- **Architecture:** Corrected the restoration behavior. The code restores from backup **regardless** of Git operation outcome, not only on failure. After a successful push, the backup is restored to return the project to its pre-commit state.
+- **Architecture:** Added execution flow ASCII diagram to clarify lock timing, retry logic, and stale lock timeout (5 minutes).
+- **Requirements:** Converted to a table format and added specific dependency versions from `pyproject.toml` (`pandas>=3.0.3`, `python-dotenv>=0.9.9`). Removed mention of `uv` as a requirement (it is a recommended tool, not a dependency).
+- **Configuration:** Added `Default` column to clarify behavior when `LIMIT` is unset. Clarified that the script **exits with error** if `EMAIL` or `SEARCH_DIR` are missing (code calls `exit(1)`).
+- **Configuration:** Clarified that `os.walk()` prevents descent into nested repositories via `dirs[:] = []`.
+- **Usage:** Removed `uv run` prefix from commands in the primary usage section. The tool is a standalone Python script and does not require `uv` to run.
+- **Usage:** Added detail on the `LIMIT` logic: the executor uses `<` comparison, not `<=`. Execution continues while the count is strictly less than the limit.
+- **Automation:** Changed the program path from `uv.exe` to `pythonw.exe`. The code is a `.pyw` file (windowless Python script) and should be run with the Python interpreter, not `uv`. Using `uv run` is valid but not required for scheduled execution.
+- **Output Structure:** Added section to document the `storage/` directory layout and CSV schema with column types.
+- **Output Structure:** Clarified that `backup_dir` is initially `None` and only populated during execution.
+- **Error Handling:** Added new section to document lock retry logic (100 retries, 0.1s intervals), stale lock timeout (5 minutes), Git failure restoration, and missing environment variable behavior.
+- **Limitations:** Added detail on lock retry timing (100 × 0.1s = 10s maximum wait).
+- **Limitations:** Clarified that failed commits are **not** removed from the queue, requiring manual intervention.
+- **Limitations:** Added limitation on space-separated `excluded_files` parsing.
+- **Limitations:** Clarified that nested repositories are explicitly handled via `dirs[:] = []` in `os.walk()`.
+- **Limitations:** Added note on `subprocess.run(..., check=True)` behavior for Git commands.
